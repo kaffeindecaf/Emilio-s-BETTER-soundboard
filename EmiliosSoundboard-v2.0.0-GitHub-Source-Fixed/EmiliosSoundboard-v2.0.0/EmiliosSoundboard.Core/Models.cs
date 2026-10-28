@@ -77,6 +77,12 @@ namespace EmiliosSoundboard
         /// <summary>When true the log records Debug/Trace detail. Useful for bug reports.</summary>
         public bool VerboseLogging = false;
 
+        /// <summary>
+        /// Uses the optional Rust native starfield renderer when its DLL is present. The
+        /// managed renderer remains the automatic fallback, so turning this off is safe.
+        /// </summary>
+        public bool NativeAcceleration = true;
+
         public void ResetToDefaults()
         {
             AnimatedBackground = true;
@@ -102,6 +108,7 @@ namespace EmiliosSoundboard
             OutputDevice = "";
             SoundOutputDeviceId = "";
             VerboseLogging = false;
+            NativeAcceleration = true;
         }
     }
 

@@ -42,5 +42,13 @@
     <Content Include="RainbowRoad.mp3">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Optional Rust acceleration. The managed renderer is used automatically when this
+         file is missing or cannot be loaded, so the app still runs from source without Rust. -->
+    <None Include="runtimes\win-x64\native\emilios_native.dll"
+          Condition="Exists('runtimes\win-x64\native\emilios_native.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <TargetPath>emilios_native.dll</TargetPath>
+    </None>
   </ItemGroup>
 </Project>

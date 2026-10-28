@@ -20,8 +20,15 @@ namespace EmiliosSoundboard
             var card = new Card(item);
             card.Appear = -0.07f * delayIndex;
             cards.Add(card);
-            viewReady = false;
+            MarkViewDirty();
             forceFrame = true;
+        }
+
+        /// <summary>Marks the filtered/sorted list and card layout dirty for the next tick.</summary>
+        private void MarkViewDirty()
+        {
+            viewReady = false;
+            layoutDirty = true;
         }
 
         private void CreateSearchUi()
@@ -37,7 +44,16 @@ namespace EmiliosSoundboard
                 PlaceholderText = "Find a sound or file type...",
                 Dock = DockStyle.Fill
             };
-            searchBox.TextChanged += (s, e) => { scrollTarget = 0; LayoutCards(); forceFrame = true; Invalidate(); };
+            searchBox.TextChanged += (s, e) =>
+            {
+                searchQuery = (searchBox.Text ?? "").Trim();
+                searchQueryCore = searchQuery.TrimStart('.');
+                scrollTarget = 0;
+                MarkViewDirty();
+                LayoutCards();
+                forceFrame = true;
+                Invalidate();
+            };
             searchBoxFrame = new AccentSearchFrame { Accent = Theme.Blue, BackColor = Color.Transparent, Padding = new Padding((int)(11 * scale), (int)(4 * scale), (int)(8 * scale), (int)(4 * scale)) };
             searchBoxFrame.Controls.Add(searchBox);
             Controls.Add(searchBoxFrame);
@@ -65,7 +81,7 @@ namespace EmiliosSoundboard
                     Selected = String.Equals(tag, sortMode, StringComparison.OrdinalIgnoreCase),
                     Font = new Font("Segoe UI", 8.2f, FontStyle.Bold)
                 };
-                chip.Click += (s, e) => { sortMode = Convert.ToString(((Control)s).Tag); RefreshSearchTheme(); LayoutCards(); Invalidate(); };
+                chip.Click += (s, e) => { sortMode = Convert.ToString(((Control)s).Tag); MarkViewDirty(); RefreshSearchTheme(); LayoutCards(); Invalidate(); };
                 searchTags.Controls.Add(chip);
             }
             Controls.Add(searchTags);
@@ -99,13 +115,18 @@ namespace EmiliosSoundboard
             Invalidate();
         }
 
-        private bool MatchesSearch(SoundItem item)
+        private bool MatchesSearch(Card card)
         {
-            if (item == null) return false;
-            string q = searchBox == null ? "" : (searchBox.Text ?? "").Trim();
-            if (!String.IsNullOrEmpty(q) && (item.Name ?? "").IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0 &&
-                Path.GetExtension(item.AudioFile ?? "").IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0) return false;
-            return true;
+            if (card == null || card.Item == null) return false;
+            if (searchQuery.Length == 0) return true;
+
+            if ((card.Item.Name ?? "").IndexOf(searchQuery, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+
+            // Compare against the pre-computed extension so filtering does not allocate a new
+            // string for every card on every keystroke.
+            return searchQueryCore.Length > 0 && card.Ext.Length > 0 &&
+                   card.Ext.IndexOf(searchQueryCore, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private int VisibleCount()
@@ -158,7 +179,7 @@ namespace EmiliosSoundboard
             for (int i = 0; i < cards.Count; i++)
             {
                 Card c = cards[i];
-                if (!c.Removing && MatchesSearch(c.Item)) view.Add(c);
+                if (!c.Removing && MatchesSearch(c)) view.Add(c);
             }
 
             if (sortMode == "NAME A-Z")
@@ -166,16 +187,17 @@ namespace EmiliosSoundboard
             else if (sortMode == "LENGTH")
                 view.Sort((a, b) => AudioFileBytes(a.Item).CompareTo(AudioFileBytes(b.Item)));
             else if (sortMode == "TYPE")
-                view.Sort((a, b) => string.Compare(Path.GetExtension(a.Item.AudioFile ?? ""),
-                                                  Path.GetExtension(b.Item.AudioFile ?? ""),
-                                                  StringComparison.OrdinalIgnoreCase));
+                view.Sort((a, b) => string.Compare(a.Ext, b.Ext, StringComparison.OrdinalIgnoreCase));
 
             viewReady = true;
         }
 
         private void LayoutCards()
         {
-            RebuildView();
+            // LayoutCards runs from the 33 Hz tick. Rebuilding and re-sorting the whole library
+            // every frame was wasted work; only do it when the width, query, sort or cards change.
+            if (!layoutDirty) return;
+            if (!viewReady) RebuildView();
             const float margin = 36f, gap = 20f, minW = 250f, maxW = 400f;
             float avail = Math.Max(200f, LW - margin);
             int cols = Math.Max(1, (int)Math.Floor((avail + gap) / (minW + gap)));
@@ -210,6 +232,7 @@ namespace EmiliosSoundboard
             float viewH = Math.Max(0f, GridBottom - GridTop);
             maxScroll = Math.Max(0f, contentH - viewH);
             scrollTarget = Math.Max(0f, Math.Min(maxScroll, scrollTarget));
+            layoutDirty = false;
         }
 
         private void SaveLibrary()
@@ -469,7 +492,7 @@ namespace EmiliosSoundboard
 
             string name = c.Item.Name;
             c.Removing = true;
-            viewReady = false;
+            MarkViewDirty();
             if (c.Appear > 1f) c.Appear = 1f;
             bool clean = store.RemoveSound(c.Item);
             SaveLibrary();

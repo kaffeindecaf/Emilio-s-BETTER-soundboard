@@ -13,6 +13,19 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+if exist "native\emilios_native\Cargo.toml" (
+  where cargo >nul 2>nul
+  if not errorlevel 1 (
+    echo Building optional Rust starfield helper...
+    cargo build --release --manifest-path "native\emilios_native\Cargo.toml"
+    if not errorlevel 1 (
+      if not exist "EmiliosSoundboard\runtimes\win-x64\native" mkdir "EmiliosSoundboard\runtimes\win-x64\native"
+      copy /Y "native\emilios_native\target\release\emilios_native.dll" "EmiliosSoundboard\runtimes\win-x64\native\emilios_native.dll" >nul
+    ) else (
+      echo Rust helper build failed; using the checked-in DLL or managed fallback.
+    )
+  )
+)
 echo Restoring packages and building...
 dotnet restore "EmiliosSoundboard.sln"
 if errorlevel 1 goto failed

@@ -402,6 +402,7 @@ namespace EmiliosSoundboard
                 StopAudio(); // switch directly from the silent microphone test to live processing
             }
             if (devices.SelectedItem == null) { MessageBox.Show(this, "No microphone was found. Connect a microphone and reopen Voice FX."); return; }
+            bool fallbackOutputUsed = false;
             try
             {
                 testMode = false;
@@ -458,7 +459,34 @@ namespace EmiliosSoundboard
                             throw;
                     }
                 }
-                if (outputInitError != null) throw outputInitError;
+                if (outputInitError != null)
+                {
+                    // The selected cable/mixer endpoint can disappear or be held exclusively.
+                    // Keep voice processing usable through the Windows default output.
+                    MMDevice fallbackDevice = null;
+                    WasapiOut fallbackOutput = null;
+                    try
+                    {
+                        fallbackDevice = new MMDeviceEnumerator().GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
+                        fallbackOutput = new WasapiOut(fallbackDevice, AudioClientShareMode.Shared, false, 150);
+                        fallbackOutput.Init(new SampleToWaveProvider16(stereoOutput));
+                        if (output != null) output.Dispose();
+                        if (activeOutputDevice != null) activeOutputDevice.Dispose();
+                        activeOutputDevice = fallbackDevice;
+                        output = fallbackOutput;
+                        outputInitError = null;
+                        fallbackOutputUsed = true;
+                        Log.Warn("voicefx", "chat output could not be opened; using the Windows default output");
+                    }
+                    catch (Exception ex)
+                    {
+                        try { if (fallbackOutput != null) fallbackOutput.Dispose(); } catch { }
+                        try { if (fallbackDevice != null) fallbackDevice.Dispose(); } catch { }
+                        Log.Warn("voicefx", "the fallback output device could not be opened either", ex);
+                    }
+
+                    if (outputInitError != null) throw outputInitError;
+                }
                 AttachCaptureHandlers();
                 startupStage = "starting audio playback";
                 output.Play();
@@ -467,8 +495,10 @@ namespace EmiliosSoundboard
                 start.Text = "VOICE CHANGER ON — TURN OFF";
                 start.Style = GlowStyle.Primary;
                 test.Text = "TEST MIC";
-                bool chatRoute = outputDevice.IsVirtualRoute || outputDevice.IsGoXlr;
-                status.Text = chatRoute ? "VOICE FX ACTIVE — CHAT ROUTE SELECTED" : "VOICE FX ACTIVE — LOCAL OUTPUT ONLY";
+                bool chatRoute = !fallbackOutputUsed && (outputDevice.IsVirtualRoute || outputDevice.IsGoXlr);
+                status.Text = fallbackOutputUsed
+                    ? "VOICE FX ACTIVE — DEFAULT OUTPUT FALLBACK"
+                    : (chatRoute ? "VOICE FX ACTIVE — CHAT ROUTE SELECTED" : "VOICE FX ACTIVE — LOCAL OUTPUT ONLY");
                 status.ForeColor = Theme.ComicStyleMode ? Color.Black : (chatRoute ? Color.FromArgb(105, 230, 180) : Theme.Blue);
             }
             catch (Exception ex)

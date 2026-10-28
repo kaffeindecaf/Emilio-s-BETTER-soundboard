@@ -195,6 +195,7 @@ namespace EmiliosSoundboard
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
+            layoutDirty = true;
             forceFrame = true;
             Invalidate();
         }

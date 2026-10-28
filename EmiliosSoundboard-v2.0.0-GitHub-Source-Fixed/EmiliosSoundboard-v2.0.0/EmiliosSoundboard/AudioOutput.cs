@@ -26,13 +26,23 @@ namespace EmiliosSoundboard
 
         private static readonly object sync = new object();
         private static List<Device> cache;
+        private static long cacheTicks;
+        private static string cachedDefaultName;
+        private static long cachedDefaultTicks;
+
+        // Windows devices are plug-and-play, so a cached list must expire. Old builds cached the
+        // list forever and could not see a USB headset or VB-CABLE installed after launch.
+        private static readonly long DeviceCacheTtlTicks = TimeSpan.FromSeconds(8).Ticks;
 
         /// <summary>Playback devices, in the order the audio backend reports them.</summary>
         public static List<Device> Devices(bool refresh = false)
         {
             lock (sync)
             {
-                if (cache != null && !refresh) return cache;
+                long now = DateTime.UtcNow.Ticks;
+                if (cache != null && !refresh &&
+                    (now - cacheTicks < DeviceCacheTtlTicks || cache.Count == 0))
+                    return cache;
 
                 var list = new List<Device>();
                 try
@@ -64,6 +74,8 @@ namespace EmiliosSoundboard
                 }
 
                 cache = list;
+                cacheTicks = now;
+                if (list.Count == 0) cachedDefaultName = null;
                 return cache;
             }
         }
@@ -80,7 +92,8 @@ namespace EmiliosSoundboard
             int index = AudioOutputPicker.ResolveIndex(storedName, names);
 
             if (index < 0 && !string.IsNullOrWhiteSpace(storedName) &&
-                !string.Equals(storedName.Trim(), AudioOutputPicker.SystemDefault, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(storedName.Trim(), AudioOutputPicker.SystemDefault, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(storedName.Trim(), AudioOutputPicker.FollowBoard, StringComparison.OrdinalIgnoreCase))
             {
                 // Stored device is gone (unplugged headset, renamed driver). Play through the default
                 // instead of failing, but say so once so it shows up in a bug report.
@@ -102,20 +115,55 @@ namespace EmiliosSoundboard
             int index = Resolve(storedName);
             if (index < 0) return false; // Missing/unresolvable device already falls back to the default.
 
+            string selected = Describe(index);
+            string windowsDefault = DefaultDeviceName();
+            if (string.IsNullOrWhiteSpace(windowsDefault)) return true;
+            return !NamesReferToSameDevice(selected, windowsDefault);
+        }
+
+        /// <summary>
+        /// Friendly name of the current Windows default output, cached briefly because this is
+        /// queried on every card press while local monitoring is enabled.
+        /// </summary>
+        public static string DefaultDeviceName()
+        {
+            lock (sync)
+            {
+                long now = DateTime.UtcNow.Ticks;
+                if (cachedDefaultName != null && now - cachedDefaultTicks < DeviceCacheTtlTicks)
+                    return cachedDefaultName;
+            }
+
+            string name = null;
             try
             {
                 using (var enumerator = new MMDeviceEnumerator())
                 using (var defaultOutput = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia))
-                {
-                    string selected = Describe(index);
-                    string windowsDefault = defaultOutput.FriendlyName ?? "";
-                    return !NamesReferToSameDevice(selected, windowsDefault);
-                }
+                    name = defaultOutput.FriendlyName ?? "";
             }
-            catch
+            catch (Exception ex)
             {
-                // If Windows cannot tell us, keep the locally audible copy rather than going silent.
-                return true;
+                // The winmm list and the WASAPI endpoint list can disagree. Treat an unknown
+                // default as "not the same device" so the local copy is never silently lost.
+                Log.Debug("audio", "could not read the Windows default output name: " + ex.Message);
+                return null;
+            }
+
+            lock (sync)
+            {
+                cachedDefaultName = name;
+                cachedDefaultTicks = DateTime.UtcNow.Ticks;
+            }
+            return name;
+        }
+
+        /// <summary>Forces both the playback-device and default-endpoint caches to refresh.</summary>
+        public static void Invalidate()
+        {
+            lock (sync)
+            {
+                cache = null;
+                cachedDefaultName = null;
             }
         }
 
@@ -141,10 +189,11 @@ namespace EmiliosSoundboard
             return AudioOutputPicker.SystemDefault;
         }
 
-        /// <summary>Forces the next call to re-read the device list.</summary>
+        /// <summary>Forces the next call to re-read the device list and default endpoint.</summary>
         public static void Refresh()
         {
-            Devices(true);
+            Invalidate();
+            Devices(false);
         }
     }
 }

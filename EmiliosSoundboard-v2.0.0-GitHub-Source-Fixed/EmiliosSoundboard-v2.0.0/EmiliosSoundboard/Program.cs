@@ -23,6 +23,12 @@ namespace EmiliosSoundboard
         /// <summary>True when the process was started with --verbose/--debug/--log/--selftest.</summary>
         internal static bool VerboseRequested { get; private set; }
 
+        /// <summary>
+        /// Minimal-effects troubleshooting mode: --safe-mode or EMILIOS_SAFE_MODE=1. It skips the
+        /// startup splash, animations and native acceleration without changing saved settings.
+        /// </summary>
+        internal static bool SafeMode { get; private set; }
+
         [STAThread]
         private static void Main(string[] args)
         {
@@ -30,6 +36,8 @@ namespace EmiliosSoundboard
             Application.SetCompatibleTextRenderingDefault(false);
 
             VerboseRequested = HasVerboseFlag(args);
+            SafeMode = HasFlag(args, "safe-mode") || HasFlag(args, "safemode") ||
+                       string.Equals(Environment.GetEnvironmentVariable("EMILIOS_SAFE_MODE"), "1", StringComparison.OrdinalIgnoreCase);
             AppLogger logger = null;
             try
             {
@@ -64,8 +72,15 @@ namespace EmiliosSoundboard
             Log.Info("app", "starting Emilio's Soundboard " + Application.ProductVersion +
                             " on " + Environment.OSVersion.VersionString +
                             " (" + (Environment.Is64BitProcess ? "64-bit" : "32-bit") + " process)" +
-                            (selfTest ? " [self-test]" : ""));
+                            (selfTest ? " [self-test]" : "") +
+                            (SafeMode ? " [safe-mode]" : ""));
             Log.Info("app", "log folder: " + LogFolder);
+            try
+            {
+                if (SafeMode) Log.Info("native", "safe mode: using the managed starfield renderer");
+                else Log.Info("native", NativeStarRenderer.IsAvailable ? "Rust starfield acceleration available" : "using the managed starfield renderer");
+            }
+            catch (Exception ex) { Log.Debug("native", "native probe failed: " + ex.Message); }
 
             try
             {
@@ -105,6 +120,18 @@ namespace EmiliosSoundboard
         private static void ReportError(Exception ex, bool fatal)
         {
             Log.Fatal("app", fatal ? "unhandled exception, the app has to close" : "unhandled exception in the UI thread", ex);
+
+            // Even if the rolling logger could not start, leave a plain-text trail in TEMP so
+            // a crash can still be diagnosed.
+            try
+            {
+                string crash = Path.Combine(Path.GetTempPath(), "EmiliosSoundboard-crash.log");
+                File.AppendAllText(crash,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + (fatal ? "FATAL" : "UI") +
+                    Environment.NewLine + (ex == null ? "Unknown error" : ex.ToString()) +
+                    Environment.NewLine + Environment.NewLine);
+            }
+            catch { }
 
             string detail = Log.Current == null
                 ? "No log is being recorded."

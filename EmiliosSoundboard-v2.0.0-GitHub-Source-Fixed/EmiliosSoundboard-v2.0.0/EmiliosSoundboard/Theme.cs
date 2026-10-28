@@ -217,7 +217,7 @@ namespace EmiliosSoundboard
             foreach (char ch in text)
             {
                 if (ch != ' ')
-                    g.DrawString(ch.ToString(), font, brush, cx, y, StringFormat.GenericTypographic);
+                    g.DrawString(CharString(ch), font, brush, cx, y, StringFormat.GenericTypographic);
                 cx += CharWidth(ch, font) + spacing;
             }
         }
@@ -225,27 +225,75 @@ namespace EmiliosSoundboard
         public static void DrawRainbowSpaced(Graphics g, string text, Font font, float x, float y, float spacing, float phase)
         {
             float cx = x;
-            for (int i = 0; i < text.Length; i++)
+            using (var b = new SolidBrush(Color.White))
             {
-                char ch = text[i];
-                if (ch != ' ')
+                for (int i = 0; i < text.Length; i++)
                 {
-                    using (var b = new SolidBrush(RainbowColor(phase + i * 25f)))
-                        g.DrawString(ch.ToString(), font, b, cx, y, StringFormat.GenericTypographic);
+                    char ch = text[i];
+                    if (ch != ' ')
+                    {
+                        b.Color = RainbowColor(phase + i * 25f);
+                        g.DrawString(CharString(ch), font, b, cx, y, StringFormat.GenericTypographic);
+                    }
+                    cx += CharWidth(ch, font) + spacing;
                 }
-                cx += CharWidth(ch, font) + spacing;
             }
         }
 
         // Character widths are measured once on a private, unscaled surface and cached.
-        private static readonly System.Collections.Generic.Dictionary<string, float> widthCache =
-            new System.Collections.Generic.Dictionary<string, float>();
+        // The key uses the Font object identity instead of building a string per character,
+        // which used to allocate hundreds of strings every frame.
+        private readonly struct CharWidthKey : IEquatable<CharWidthKey>
+        {
+            private readonly Font font;
+            private readonly char ch;
+
+            public CharWidthKey(Font font, char ch)
+            {
+                this.font = font;
+                this.ch = ch;
+            }
+
+            public bool Equals(CharWidthKey other)
+            {
+                return ReferenceEquals(font, other.font) && ch == other.ch;
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is CharWidthKey other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                return (RuntimeHelpers.GetHashCode(font) * 397) ^ ch;
+            }
+        }
+
+        private static readonly Dictionary<CharWidthKey, float> widthCache =
+            new Dictionary<CharWidthKey, float>();
+        private static readonly Dictionary<char, string> charStrings = new Dictionary<char, string>();
         private static Bitmap measureBitmap;
         private static Graphics measureGraphics;
 
+        /// <summary>Drops cached font measurements after fonts are recreated (comic mode toggle).</summary>
+        public static void ClearFontMeasurementCache()
+        {
+            widthCache.Clear();
+        }
+
+        private static string CharString(char ch)
+        {
+            string value;
+            if (charStrings.TryGetValue(ch, out value)) return value;
+            value = ch.ToString();
+            charStrings[ch] = value;
+            return value;
+        }
+
         private static float CharWidth(char ch, Font font)
         {
-            string key = font.Name + "|" + font.Size.ToString("0.##") + "|" + (int)font.Style + "|" + font.Unit + "|" + ch;
+            var key = new CharWidthKey(font, ch);
             float width;
             if (widthCache.TryGetValue(key, out width)) return width;
 
@@ -266,7 +314,7 @@ namespace EmiliosSoundboard
             }
             else
             {
-                width = measureGraphics.MeasureString(ch.ToString(), font, 4000, fmt).Width;
+                width = measureGraphics.MeasureString(CharString(ch), font, 4000, fmt).Width;
             }
 
             widthCache[key] = width;

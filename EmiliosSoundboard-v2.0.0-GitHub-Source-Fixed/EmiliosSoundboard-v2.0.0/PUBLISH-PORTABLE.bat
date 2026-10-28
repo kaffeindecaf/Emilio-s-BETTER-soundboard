@@ -9,6 +9,17 @@ if errorlevel 1 (
   exit /b 1
 )
 if not exist "%~dp0release" mkdir "%~dp0release"
+if exist "native\emilios_native\Cargo.toml" (
+  where cargo >nul 2>nul
+  if not errorlevel 1 (
+    echo Building optional Rust starfield helper...
+    cargo build --release --manifest-path "native\emilios_native\Cargo.toml"
+    if not errorlevel 1 (
+      if not exist "EmiliosSoundboard\runtimes\win-x64\native" mkdir "EmiliosSoundboard\runtimes\win-x64\native"
+      copy /Y "native\emilios_native\target\release\emilios_native.dll" "EmiliosSoundboard\runtimes\win-x64\native\emilios_native.dll" >nul
+    )
+  )
+)
 echo Publishing self-contained Windows x64 build...
 dotnet publish "EmiliosSoundboard\EmiliosSoundboard.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o "%~dp0release\EmiliosSoundboard-v2-win-x64"
 if errorlevel 1 goto failed

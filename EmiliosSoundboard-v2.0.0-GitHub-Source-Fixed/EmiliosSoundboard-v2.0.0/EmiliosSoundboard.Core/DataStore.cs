@@ -24,12 +24,25 @@ namespace EmiliosSoundboard
         public string ConfigDir { get; private set; }
         public string ConfigPath { get; private set; }
 
+        /// <summary>The previous good library file, written by <see cref="Save"/>.</summary>
+        public string BackupPath { get { return ConfigPath + ".bak"; } }
+
         public LibraryData Data { get; private set; }
+
+        private static readonly XmlSerializer librarySerializer = new XmlSerializer(typeof(LibraryData));
+        private static readonly object serializerSync = new object();
+        private readonly object saveSync = new object();
 
         /// <summary>Set when the saved library was unreadable and a fresh one was started.</summary>
         public string LoadWarning { get; private set; }
 
         public string LastSaveError { get; private set; }
+
+        /// <summary>True when the normal LocalAppData folder was unusable and a temp folder was used.</summary>
+        public bool UsingFallbackFolder { get; private set; }
+
+        /// <summary>Why the fallback folder was needed; empty when the normal folder is in use.</summary>
+        public string FallbackReason { get; private set; }
 
         /// <summary>
         /// Optional image pipeline. When null, imported images are copied through unchanged
@@ -38,9 +51,15 @@ namespace EmiliosSoundboard
         public IImageImporter ImageImporter { get; set; }
 
         public DataStore()
-            : this(Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EmiliosSoundboard"))
+            : this(DefaultRoot())
         {
+        }
+
+        private static string DefaultRoot()
+        {
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(local)) local = Path.GetTempPath();
+            return Path.Combine(local, "EmiliosSoundboard");
         }
 
         /// <summary>Creates a store rooted at an explicit folder. Used by tests.</summary>
@@ -49,17 +68,49 @@ namespace EmiliosSoundboard
             if (string.IsNullOrWhiteSpace(root))
                 throw new ArgumentException("A storage folder is required.", "root");
 
+            SetRoot(root);
+            try
+            {
+                EnsureFolders();
+            }
+            catch (Exception ex)
+            {
+                // A locked/read-only profile or a redirected OneDrive folder must not stop the
+                // app from opening. Fall back to the user's temp folder and explain why.
+                string fallback = Path.Combine(Path.GetTempPath(), "EmiliosSoundboard");
+                SetRoot(fallback);
+                try
+                {
+                    EnsureFolders();
+                    UsingFallbackFolder = true;
+                    FallbackReason = "The normal data folder could not be created (" + ex.Message +
+                                     "), so this session uses:\n" + fallback;
+                    Log.Error("storage", "data folder unavailable; using " + fallback, ex);
+                }
+                catch
+                {
+                    // If even temp is unusable there is nothing safe left to try.
+                    throw;
+                }
+            }
+
+            Data = new LibraryData();
+        }
+
+        private void SetRoot(string root)
+        {
             Root = root;
             SoundsDir = Path.Combine(Root, "Sounds");
             ImagesDir = Path.Combine(Root, "Backgrounds");
             ConfigDir = Path.Combine(Root, "Config");
             ConfigPath = Path.Combine(ConfigDir, "library.xml");
+        }
 
+        private void EnsureFolders()
+        {
             Directory.CreateDirectory(SoundsDir);
             Directory.CreateDirectory(ImagesDir);
             Directory.CreateDirectory(ConfigDir);
-
-            Data = new LibraryData();
         }
 
         // ------------------------------------------------------------------ load / save
@@ -68,42 +119,93 @@ namespace EmiliosSoundboard
         {
             LoadWarning = null;
             LibraryData loaded = null;
+            Exception primaryError = null;
 
             if (File.Exists(ConfigPath))
             {
                 try
                 {
-                    var serializer = new XmlSerializer(typeof(LibraryData));
-                    using (var fs = new FileStream(ConfigPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                    {
-                        loaded = serializer.Deserialize(fs) as LibraryData;
-                    }
+                    loaded = ReadLibrary(ConfigPath);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    loaded = null;
-                    string backup = null;
-                    try
-                    {
-                        backup = Path.Combine(ConfigDir, "library.corrupt-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".xml");
-                        File.Copy(ConfigPath, backup, true);
-                    }
-                    catch
-                    {
-                        backup = null;
-                    }
-
-                    LoadWarning = "Your saved sound list could not be read, so the app started with an empty list." +
-                                  (backup != null ? "\n\nA copy of the damaged file was kept here:\n" + backup : "") +
-                                  "\n\nYour imported audio files are still in:\n" + SoundsDir;
-
-                    Log.Error("storage", "library.xml could not be read" +
-                                         (backup != null ? "; damaged copy kept at " + backup : ""), null);
+                    primaryError = ex;
+                    Log.Error("storage", "library.xml could not be read", ex);
                 }
+            }
+
+            // Recover from the last good copy before giving up. The old code only kept a
+            // timestamped damaged file, which turned a single write glitch into an empty board.
+            bool recovered = false;
+            if (loaded == null && File.Exists(BackupPath))
+            {
+                try
+                {
+                    loaded = ReadLibrary(BackupPath);
+                    recovered = loaded != null;
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("storage", "library.xml.bak could not be read either", ex);
+                }
+            }
+
+            if (loaded == null && primaryError != null)
+            {
+                string backup = ArchiveCorruptCopy();
+                LoadWarning = "Your saved sound list could not be read, so the app started with an empty list." +
+                              (backup != null ? "\n\nA copy of the damaged file was kept here:\n" + backup : "") +
+                              "\n\nYour imported audio files are still in:\n" + SoundsDir;
+
+                Log.Error("storage", "library.xml could not be read" +
+                                     (backup != null ? "; damaged copy kept at " + backup : ""), null);
+            }
+            else if (recovered)
+            {
+                bool mainWasPresent = File.Exists(ConfigPath);
+                string backup = mainWasPresent ? ArchiveCorruptCopy() : null;
+                LoadWarning = (mainWasPresent
+                                  ? "The main sound list was damaged, so the last good backup was loaded."
+                                  : "The main sound list was missing, so the last good backup was loaded.") +
+                              (backup != null ? "\n\nA copy of the damaged file was kept here:\n" + backup : "") +
+                              "\n\nCheck your sounds, then save once to repair the main file.";
+
+                Log.Warn("storage", (mainWasPresent ? "library.xml was damaged" : "library.xml was missing") +
+                                    "; recovered the last good backup" +
+                                    (backup != null ? " (damaged copy: " + backup + ")" : ""));
             }
 
             Data = loaded ?? new LibraryData();
             Sanitize();
+        }
+
+        private static LibraryData ReadLibrary(string path)
+        {
+            // DTDs are never part of this format. Refusing them avoids external-entity tricks
+            // if a library file is ever copied from somewhere untrusted.
+            var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var reader = XmlReader.Create(fs, settings))
+            {
+                lock (serializerSync)
+                {
+                    return librarySerializer.Deserialize(reader) as LibraryData;
+                }
+            }
+        }
+
+        private string ArchiveCorruptCopy()
+        {
+            try
+            {
+                string backup = Path.Combine(ConfigDir, "library.corrupt-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".xml");
+                File.Copy(ConfigPath, backup, true);
+                return backup;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private void Sanitize()
@@ -154,30 +256,72 @@ namespace EmiliosSoundboard
 
         public bool Save()
         {
-            LastSaveError = null;
-            try
+            lock (saveSync)
             {
-                Directory.CreateDirectory(ConfigDir);
+                LastSaveError = null;
                 string tmp = ConfigPath + ".tmp";
 
-                var serializer = new XmlSerializer(typeof(LibraryData));
-                var settings = new XmlWriterSettings { Indent = true, Encoding = new System.Text.UTF8Encoding(false) };
-                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
-                using (var writer = XmlWriter.Create(fs, settings))
+                for (int attempt = 0; attempt < 2; attempt++)
                 {
-                    serializer.Serialize(writer, Data);
+                    try
+                    {
+                        Directory.CreateDirectory(ConfigDir);
+
+                        var settings = new XmlWriterSettings { Indent = true, Encoding = new System.Text.UTF8Encoding(false) };
+                        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                        using (var writer = XmlWriter.Create(fs, settings))
+                        {
+                            lock (serializerSync)
+                            {
+                                librarySerializer.Serialize(writer, Data);
+                            }
+                        }
+
+                        if (File.Exists(ConfigPath))
+                        {
+                            try
+                            {
+                                File.Replace(tmp, ConfigPath, BackupPath);
+                            }
+                            catch (Exception replaceError) when (
+                                replaceError is IOException || replaceError is UnauthorizedAccessException ||
+                                replaceError is PlatformNotSupportedException || replaceError is NotSupportedException)
+                            {
+                                // Some sync folders, FAT volumes and lock-down policies reject
+                                // File.Replace even though ordinary file moves work. Keep the same
+                                // recovery guarantee with a copy + move fallback.
+                                Log.Warn("storage", "atomic replace was unavailable; using a copy fallback", replaceError);
+                                File.Copy(ConfigPath, BackupPath, true);
+                                File.Delete(ConfigPath);
+                                File.Move(tmp, ConfigPath);
+                            }
+                        }
+                        else
+                        {
+                            File.Move(tmp, ConfigPath);
+                        }
+
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        LastSaveError = ex.Message;
+                        if (attempt == 0 && (ex is IOException || ex is UnauthorizedAccessException))
+                        {
+                            // A virus scanner or cloud-sync client can hold the file for a moment.
+                            System.Threading.Thread.Sleep(120);
+                            continue;
+                        }
+
+                        Log.Error("storage", "saving library.xml failed: " + ex.Message, ex);
+                        return false;
+                    }
+                    finally
+                    {
+                        try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                    }
                 }
 
-                if (File.Exists(ConfigPath))
-                    File.Replace(tmp, ConfigPath, ConfigPath + ".bak");
-                else
-                    File.Move(tmp, ConfigPath);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                LastSaveError = ex.Message;
-                Log.Error("storage", "saving library.xml failed: " + ex.Message, ex);
                 return false;
             }
         }

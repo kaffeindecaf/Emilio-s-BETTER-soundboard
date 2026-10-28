@@ -55,6 +55,8 @@ A customizable Windows soundboard with a space-inspired UI, personal sound libra
 
 If you want to build and launch without creating a shortcut, run **`BUILD-AND-RUN.bat`**. You can also open `EmiliosSoundboard.sln` in Visual Studio 2022.
 
+A prebuilt self-contained executable is included at **`dist\EmiliosSoundboard.exe`** (Windows x64). It does not need the .NET runtime installed. To rebuild it, run `PUBLISH-SINGLE-EXE.bat` inside the source folder.
+
 ### Create a portable release build
 
 Run **`PUBLISH-PORTABLE.bat`** on Windows. It should create a self-contained Windows x64 output under `release/`. Test the generated executable before attaching it to a GitHub Release.
@@ -94,7 +96,11 @@ The code is split into three projects: `EmiliosSoundboard.Core` (library format 
 
 **No verified benchmark results are available yet.** I don't want to invent FPS, CPU, memory, or startup-time numbers. The graph below is a benchmark checklist - not fabricated measurements. Once measurements are collected on a real Windows machine, replace it with actual values and include the PC specs and test method.
 
-The current code is written to avoid the usual fullscreen costs: the static backdrop (gradient, photo, drifting haze) is cached and re-rendered a few times a second instead of every frame, the card list is built once per frame instead of per paint, and the paint path no longer allocates GDI+ objects per frame. Those changes reduce work by construction; they have not been measured on a real machine.
+The current code is written to avoid the usual fullscreen costs: the static backdrop (gradient, photo, drifting haze) is cached and re-rendered a few times a second instead of every frame, the card list is rebuilt only when the query/sort/layout changes instead of every tick, and the paint path reuses fonts, formats and geometry buffers instead of allocating them per frame. Those changes reduce work by construction; they have not been measured on a real machine.
+
+The animated star/dust layer can additionally be rasterized by a small Rust `cdylib` (`emilios_native.dll`) into a single transparent bitmap. If the DLL is missing, blocked, or returns an error, the same managed GDI+ renderer is used automatically. Build it with `BUILD-NATIVE.bat`; the app output already includes a prebuilt x64 copy.
+
+Stability fallbacks now cover playback device failures (requested device → default → WASAPI → raw WAV), damaged/missing `library.xml` (automatic `.bak` recovery), unwritable data folders (temp-folder fallback), repeated paint failures (minimal safe frame), broken startup media, Discord being closed, and Voice FX output-device failures. Troubleshoot with `EmiliosSoundboard.exe --safe-mode`.
 
 ```mermaid
 xychart-beta

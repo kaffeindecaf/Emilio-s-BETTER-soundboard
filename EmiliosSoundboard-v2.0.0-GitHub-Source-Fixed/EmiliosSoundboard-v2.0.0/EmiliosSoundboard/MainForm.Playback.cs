@@ -38,10 +38,11 @@ namespace EmiliosSoundboard
                                       "', local monitor=" + mirrorToLocal);
                 localMonitorPlayer.Stop();
                 player.Play(c.Item.Id, path, device);
-                if (mirrorToLocal)
+                if (mirrorToLocal && !player.OutputFellBack)
                 {
                     // The routed copy is authoritative; the local copy just keeps the clip audible
-                    // on the user's speakers while it also feeds the virtual chat endpoint.
+                    // on the user's speakers while it also feeds the virtual chat endpoint. If the
+                    // player already fell back to the default device, do not play a second copy.
                     try { localMonitorPlayer.Play(c.Item.Id, path); }
                     catch (Exception monitorError)
                     {

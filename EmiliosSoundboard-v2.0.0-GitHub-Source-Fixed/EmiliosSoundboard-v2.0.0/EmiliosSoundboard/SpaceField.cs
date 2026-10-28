@@ -47,6 +47,18 @@ namespace EmiliosSoundboard
         private Color glowAccent = Color.Empty;
         private float glowAttrAlpha = -1f;
 
+        // Optional Rust renderer. The managed path stays intact and is used automatically if
+        // the native DLL is absent, returns an error, or the user disables acceleration.
+        private Bitmap nativeLayer;
+        private int nativeLayerW, nativeLayerH;
+        private NativeStarRenderer.Star[] nativeStars = new NativeStarRenderer.Star[0];
+        private float renderScale = 1f;
+        private bool nativeBroken;
+        private bool loggedNativeSuccess;
+
+        public bool NativeEnabled { get; set; }
+        public float RenderScale { get { return renderScale; } set { renderScale = Math.Max(1f, value); } }
+
         private const float ReactRadius = 150f;
 
         // ------------------------------------------------------------------ setup
@@ -187,9 +199,113 @@ namespace EmiliosSoundboard
 
         public void Draw(Graphics g, float bgLevel)
         {
+            if (NativeEnabled && !nativeBroken && TryDrawNative(g, bgLevel))
+            {
+                DrawShootingStars(g, bgLevel);
+                return;
+            }
+
             DrawList(g, dust, bgLevel, true);
             DrawList(g, stars, bgLevel, false);
             DrawShootingStars(g, bgLevel);
+        }
+
+        /// <summary>
+        /// Composites dust and stars into one transparent bitmap with the Rust renderer and
+        /// blits it once. Returns false if anything goes wrong so the caller can fall back.
+        /// </summary>
+        private bool TryDrawNative(Graphics g, float bgLevel)
+        {
+            try
+            {
+                int pw = Math.Max(1, (int)Math.Round(width * renderScale));
+                int ph = Math.Max(1, (int)Math.Round(height * renderScale));
+                if (nativeLayer == null || nativeLayerW != pw || nativeLayerH != ph)
+                {
+                    if (nativeLayer != null) nativeLayer.Dispose();
+                    nativeLayer = new Bitmap(pw, ph, PixelFormat.Format32bppPArgb);
+                    nativeLayerW = pw;
+                    nativeLayerH = ph;
+                }
+
+                int needed = dust.Count * 2 + stars.Count;
+                if (nativeStars.Length < needed)
+                    nativeStars = new NativeStarRenderer.Star[Math.Max(16, needed + needed / 2)];
+
+                int count = 0;
+                count = BuildNativeCommands(nativeStars, count, dust, bgLevel, true);
+                count = BuildNativeCommands(nativeStars, count, stars, bgLevel, false);
+                if (count == 0) return false;
+
+                if (!NativeStarRenderer.TryRender(nativeLayer, nativeStars, count))
+                {
+                    nativeBroken = true;
+                    return false;
+                }
+
+                // The bitmap is in device pixels; `width`/`height` are logical units and the
+                // Graphics transform scales them back to the same pixel count.
+                g.DrawImage(nativeLayer, 0f, 0f, width, height);
+                if (!loggedNativeSuccess)
+                {
+                    loggedNativeSuccess = true;
+                    Log.Debug("native", "native starfield layer active (" + count + " commands)");
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                nativeBroken = true;
+                Log.Warn("native", "native starfield draw failed; using managed drawing", ex);
+                return false;
+            }
+        }
+
+        private int BuildNativeCommands(NativeStarRenderer.Star[] target, int index,
+                                        List<Star> list, float bgLevel, bool isDust)
+        {
+            for (int i = 0; i < list.Count; i++)
+            {
+                Star s = list[i];
+                float twinkle = 1f - s.TwinkleAmount * bgLevel * (0.5f + 0.5f * (float)Math.Sin(s.Phase));
+                float b = Theme.Clamp01(s.Base * twinkle + s.Boost * (isDust ? 0.25f : 0.55f));
+                int a = (int)(b * 255f);
+                if (a < 5) continue;
+
+                float x = s.X * width + s.Ox;
+                float y = s.Y * height + s.Oy;
+                if (x < -10f || y < -10f || x > width + 10f || y > height + 10f) continue;
+
+                Color c = StarColor(s.Kind);
+                float r = c.R / 255f, g = c.G / 255f, blue = c.B / 255f;
+
+                if (isDust)
+                {
+                    // Match the old two-ellipse dust: a wide faint mote plus a brighter core.
+                    target[index++] = new NativeStarRenderer.Star
+                    {
+                        X = x, Y = y, Radius = Math.Max(0.5f, s.Size),
+                        R = r, G = g, B = blue, Alpha = Math.Min(a, 46) / 255f * 0.85f, Halo = 0f
+                    };
+                    target[index++] = new NativeStarRenderer.Star
+                    {
+                        X = x, Y = y, Radius = Math.Max(0.35f, s.Size * 0.5f),
+                        R = r, G = g, B = blue, Alpha = Math.Min(a, 70) / 255f, Halo = 0f
+                    };
+                    continue;
+                }
+
+                float size = s.Size * (1f + s.Boost * 0.35f);
+                target[index++] = new NativeStarRenderer.Star
+                {
+                    X = x, Y = y,
+                    Radius = Math.Max(0.55f, size * 0.5f),
+                    R = r, G = g, B = blue,
+                    Alpha = a / 255f,
+                    Halo = (s.Halo || s.Boost > 0.25f) ? 1f : 0f
+                };
+            }
+            return index;
         }
 
         private void DrawShootingStars(Graphics g, float bgLevel)
@@ -402,6 +518,7 @@ namespace EmiliosSoundboard
         public void Dispose()
         {
             brush.Dispose();
+            if (nativeLayer != null) { nativeLayer.Dispose(); nativeLayer = null; }
             if (glowBitmap != null) { glowBitmap.Dispose(); glowBitmap = null; }
             glowAccent = Color.Empty;
             glowAttrAlpha = -1f;

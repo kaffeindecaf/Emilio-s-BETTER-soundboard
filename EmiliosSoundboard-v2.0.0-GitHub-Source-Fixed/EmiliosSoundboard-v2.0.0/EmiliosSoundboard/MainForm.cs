@@ -31,6 +31,7 @@ namespace EmiliosSoundboard
         private readonly AudioPlayer startupAudio = new AudioPlayer();
         private VoiceFxForm voiceFxWindow;
         private readonly DiscordPresence discordPresence = new DiscordPresence();
+        private float discordRetryTimer = 10f;
         private bool previousCoolMode;
         private string loadedBackgroundPath = "";
         private Button sidebarArrow;
@@ -54,14 +55,24 @@ namespace EmiliosSoundboard
         private bool sidebarOpen = true;
         private readonly SpaceField field = new SpaceField();
         private readonly List<Card> cards = new List<Card>();
-        // Visible + sorted card list, rebuilt once per frame instead of on every paint and tick.
+        // Visible + sorted card list, rebuilt only when the query, sort order or cards change.
         private readonly List<Card> view = new List<Card>();
         private bool viewReady;
+        private bool layoutDirty = true;
         // Cached audio durations so the LENGTH sort never opens a file per comparison.
         private readonly Dictionary<string, long> durationCache = new Dictionary<string, long>();
         private readonly Timer timer = new Timer();
         private readonly Stopwatch clock = Stopwatch.StartNew();
         private readonly float scale;
+        private readonly bool safeMode = Program.SafeMode;
+        private string searchQuery = "";
+        private string searchQueryCore = "";
+        private int paintFailures;
+        private bool safePaintMode;
+        private Font fittedTitleFont;
+        private float fittedTitleWidth;
+        private float fittedTitleSafeWidth = -1f;
+        private bool fittedTitleComic;
         private Icon appIcon;
         private TextBox searchBox;
         private Panel searchBoxFrame;
@@ -106,6 +117,7 @@ namespace EmiliosSoundboard
         public MainForm()
         {
             scale = Theme.DpiScale();
+            field.RenderScale = scale;
             Log.Debug("mainform", "constructor start (dpi scale " + scale.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + ")");
             AutoScaleMode = AutoScaleMode.None;
             Text = "Emilio's Soundboard";
@@ -151,7 +163,7 @@ namespace EmiliosSoundboard
             CreateSearchUi();
             sidebarArrow = new Button { Text = "�?�", FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(220, 8, 11, 22), ForeColor = Theme.CoolWhite, Font = new Font("Comic Sans MS", 15f, FontStyle.Bold), Size = new Size((int)(28 * scale), (int)(44 * scale)), TabStop = false };
             sidebarArrow.FlatAppearance.BorderColor = Theme.Blue; sidebarArrow.FlatAppearance.BorderSize = 1;
-            sidebarArrow.Click += (s, e) => { sidebarOpen = !sidebarOpen; sidebarArrow.Text = sidebarOpen ? "�?�" : "�?�"; PositionSearchUi(); LayoutCards(); Invalidate(); };
+            sidebarArrow.Click += (s, e) => { sidebarOpen = !sidebarOpen; sidebarArrow.Text = sidebarOpen ? "�?�" : "�?�"; layoutDirty = true; PositionSearchUi(); LayoutCards(); Invalidate(); };
             Controls.Add(sidebarArrow); sidebarArrow.BringToFront(); PositionSearchUi();
             if (set.ComicStyleMode)
             {
@@ -173,18 +185,32 @@ namespace EmiliosSoundboard
             timer.Interval = 30; // ~33 FPS reduces idle CPU usage while keeping motion smooth
             timer.Tick += OnTick;
             timer.Start();
+            // Spend less CPU while the window is in the background. The animation is still
+            // visible when the user returns, but idle battery/CPU cost drops noticeably.
+            Activated += (s, e) => { try { timer.Interval = 30; } catch { } };
+            Deactivate += (s, e) => { try { timer.Interval = 55; } catch { } };
             Shown += (s, e) => StartStartupExperience();
             FormClosed += (s, e) => { try { startupAudio.Dispose(); } catch { } try { if (marioKartSprite != null) marioKartSprite.Dispose(); } catch { } try { if (desktopPetSprite != null) desktopPetSprite.Dispose(); } catch { } };
+            if (safeMode)
+                Log.Warn("app", "safe mode is on: startup media and hardware-accelerated effects are disabled");
+
             Log.Debug("mainform", "constructor finished: " + cards.Count + " card(s), comic=" + set.ComicStyleMode + ", resolution=" + set.WindowResolution);
         }
 
         private void StartStartupExperience()
         {
+            if (safeMode)
+            {
+                Opacity = 1;
+                return;
+            }
+
             string defaultSoundPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WindowsXPStartup.mp3");
             string customSoundPath = store.Data.Settings.StartupSoundPath ?? "";
             string soundPath = !String.IsNullOrWhiteSpace(customSoundPath) && File.Exists(customSoundPath) ? customSoundPath : defaultSoundPath;
             string photoPath = store.Data.Settings.StartupPhotoPath ?? "";
             string videoPath = store.Data.Settings.StartupVideoPath ?? "";
+            Action closeSplash = null;
             try
             {
                 if (!String.IsNullOrWhiteSpace(videoPath) && File.Exists(videoPath))
@@ -196,8 +222,13 @@ namespace EmiliosSoundboard
                         try { startupAudio.Stop(); } catch { }
                         try { Opacity = 1; Activate(); } catch { }
                     });
+                    closeSplash = () => { try { splash.Close(); } catch { } };
                     splash.Show();
-                    if (File.Exists(soundPath)) startupAudio.Play("startup-sound", soundPath, store.Data.Settings.OutputDevice);
+                    if (File.Exists(soundPath))
+                    {
+                        try { startupAudio.Play("startup-sound", soundPath, store.Data.Settings.OutputDevice); }
+                        catch (Exception audioError) { Log.Warn("audio", "startup sound could not play", audioError); }
+                    }
                 }
                 else if (!String.IsNullOrWhiteSpace(photoPath) && File.Exists(photoPath))
                 {
@@ -210,6 +241,7 @@ namespace EmiliosSoundboard
                     var ownerBounds = Bounds;
                     splash.Location = new Point(ownerBounds.Left + (ownerBounds.Width - popupW) / 2, ownerBounds.Top + (ownerBounds.Height - popupH) / 2);
                     Image img = Image.FromFile(photoPath);
+                    closeSplash = () => { try { splash.Close(); splash.Dispose(); img.Dispose(); } catch { } };
                     var view = new PictureBox { Dock = DockStyle.Fill, Image = img, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.Black, TabStop = false };
                     splash.Controls.Add(view);
                     var life = new Stopwatch();
@@ -228,7 +260,11 @@ namespace EmiliosSoundboard
                     splash.Shown += (a, b) => { life.Restart(); closeTimer.Start(); };
                     splash.FormClosed += (a, b) => { try { closeTimer.Stop(); closeTimer.Dispose(); } catch { } };
                     splash.Show();
-                    if (File.Exists(soundPath)) startupAudio.Play("startup-sound", soundPath, store.Data.Settings.OutputDevice);
+                    if (File.Exists(soundPath))
+                    {
+                        try { startupAudio.Play("startup-sound", soundPath, store.Data.Settings.OutputDevice); }
+                        catch (Exception audioError) { Log.Warn("audio", "startup sound could not play", audioError); }
+                    }
                 }
                 else
                 {
@@ -237,8 +273,12 @@ namespace EmiliosSoundboard
             }
             catch (Exception ex)
             {
+                // Never leave the main window invisible because a codec, image or audio device
+                // failed. Close any half-created splash before restoring the board.
+                if (closeSplash != null) closeSplash();
                 Opacity = 1;
-                try { MessageBox.Show(this, "Could not play the custom startup media:\n" + ex.Message, "Startup", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
+                try { Activate(); } catch { }
+                Log.Warn("startup", "custom startup media failed; continuing without it", ex);
             }
         }
 
@@ -300,6 +340,9 @@ namespace EmiliosSoundboard
                                       fCoolLabel, fCredit, fLink, fVoiceFx, fStop })
                 if (f != null) f.Dispose();
             CreateFonts();
+            Theme.ClearFontMeasurementCache();
+            fittedTitleFont = null;
+            fittedTitleSafeWidth = -1f;
             InvalidateBackdrop();
             RefreshSearchTheme();
             Invalidate(true);
@@ -489,7 +532,11 @@ namespace EmiliosSoundboard
         {
             base.OnShown(e);
 
-            if (store.LoadWarning != null)
+            if (store.UsingFallbackFolder)
+            {
+                MessageDialog.Show(this, "Using a temporary data folder", store.FallbackReason);
+            }
+            else if (store.LoadWarning != null)
             {
                 MessageDialog.Show(this, "Could not read your saved list", store.LoadWarning);
             }
@@ -511,13 +558,15 @@ namespace EmiliosSoundboard
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            timer.Stop();
+            try { timer.Stop(); } catch { }
             try { player.Stop(); } catch { }
             try { localMonitorPlayer.Stop(); } catch { }
+            try { coolMusic.Stop(); } catch { }
+            try { startupAudio.Stop(); } catch { }
             if (voiceFxWindow != null && !voiceFxWindow.IsDisposed)
             { try { voiceFxWindow.Close(); } catch { } voiceFxWindow = null; }
-            discordPresence.Dispose();
-            store.Save();
+            try { discordPresence.Dispose(); } catch { }
+            try { store.Save(); } catch (Exception ex) { Log.Error("storage", "final save failed", ex); }
             base.OnFormClosing(e);
         }
 

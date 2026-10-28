@@ -40,6 +40,37 @@ namespace EmiliosSoundboard
         {
             Alignment = StringAlignment.Center
         };
+        private readonly StringFormat stopFormat = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap
+        };
+        // Reused by DrawCard so the paint path does not allocate a PointF[] for every card.
+        private readonly PointF[] coverDest = new PointF[3];
+
+        // Cool Mode used to allocate a dozen arrays and ~200 small polygons every frame.
+        // These buffers are reused instead; GDI+ copies the points during the call.
+        private const int RoadCount = 100;
+        private static readonly Color[] RoadColors =
+        {
+            Color.Magenta, Color.Red, Color.Orange, Color.Yellow,
+            Color.Lime, Color.Cyan, Color.DodgerBlue, Color.Violet
+        };
+        private readonly PointF[] roadCenter = new PointF[RoadCount];
+        private readonly float[] roadWidths = new float[RoadCount];
+        private readonly PointF[] roadLeft = new PointF[RoadCount];
+        private readonly PointF[] roadRight = new PointF[RoadCount];
+        private readonly PointF[] roadSideLeft = new PointF[RoadCount];
+        private readonly PointF[] roadSideRight = new PointF[RoadCount];
+        private readonly PointF[] roadPoly = new PointF[RoadCount * 2];
+        private readonly PointF[] roadSurface = new PointF[RoadCount * 2];
+        private readonly PointF[] roadBand = new PointF[RoadCount * 2];
+        private readonly PointF[] roadMid = new PointF[RoadCount];
+        private readonly PointF[] roadLine = new PointF[RoadCount];
+        private readonly PointF[] roadSegment = new PointF[4];
+        private readonly PointF[] emptyGlowPoints = new PointF[4];
+        private readonly Color[] emptyGlowSurround = new Color[4];
 
         /// <summary>Title font for a size, cached: the auto-fit loop used to allocate one per frame.</summary>
         private Font TitleFont(float size)
@@ -87,6 +118,7 @@ namespace EmiliosSoundboard
             centerFormat.Dispose();
             noWrapCenterFormat.Dispose();
             wrapCenterFormat.Dispose();
+            stopFormat.Dispose();
         }
 
         private SolidBrush B(Color c)
@@ -106,7 +138,45 @@ namespace EmiliosSoundboard
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            var g = e.Graphics;
+            try
+            {
+                if (safePaintMode)
+                {
+                    DrawSafePaint(e.Graphics);
+                    return;
+                }
+                PaintFrame(e.Graphics);
+            }
+            catch (Exception ex)
+            {
+                // A broken driver, out-of-memory bitmap or a malformed user image can throw from
+                // inside GDI+. Keep the window alive and switch to a deliberately simple frame.
+                paintFailures++;
+                if (paintFailures <= 3)
+                    Log.Error("paint", "a frame failed to paint (attempt " + paintFailures + ")", ex);
+
+                if (paintFailures >= 3) safePaintMode = true;
+                try { DrawSafePaint(e.Graphics); } catch { }
+            }
+        }
+
+        private void DrawSafePaint(Graphics g)
+        {
+            try
+            {
+                g.ResetTransform();
+                g.Clear(Theme.Black);
+                using (var b = new SolidBrush(Theme.CoolWhite))
+                    g.DrawString("Emilio's Soundboard", fTitleS, b, 24f, 24f);
+            }
+            catch
+            {
+                // Last resort: Windows will paint the window background.
+            }
+        }
+
+        private void PaintFrame(Graphics g)
+        {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAlias;
             g.InterpolationMode = InterpolationMode.Bilinear;
@@ -126,7 +196,7 @@ namespace EmiliosSoundboard
             // costs one 1:1 blit instead of four oversized bilinear blits per frame. Comic mode
             // paints its halftone paper inside the same cached surface.
             DrawBackdrop(g, w, h);
-            if (!set.ComicStyleMode)
+            if (!set.ComicStyleMode && !safeMode)
             {
                 if (set.CoolMode) DrawRainbowRoad(g, w, h, hazeTime);
                 field.Draw(g, bgLevel);
@@ -170,7 +240,7 @@ namespace EmiliosSoundboard
 
         private void DrawDesktopPet(Graphics g, float w, float h)
         {
-            if (!store.Data.Settings.DesktopPetEnabled || desktopPetSprite == null) return;
+            if (safeMode || !store.Data.Settings.DesktopPetEnabled || desktopPetSprite == null) return;
             float size = Math.Max(0.4f, Math.Min(3.0f, store.Data.Settings.DesktopPetSize / 100f));
             float ratio = desktopPetSprite.Height / Math.Max(1f, desktopPetSprite.Width);
             float baseW = 58f, baseH = baseW * ratio;
@@ -267,10 +337,10 @@ namespace EmiliosSoundboard
         private void DrawRainbowRoad(Graphics g, float w, float h, float t)
         {
             // Perspective Rainbow Road: raised polygonal ribbon with cursor-reactive S bends and a small looping Mario kart sprite.
-            Color[] colors = { Color.Magenta, Color.Red, Color.Orange, Color.Yellow, Color.Lime, Color.Cyan, Color.DodgerBlue, Color.Violet };
-            const int count = 100;
-            var center = new PointF[count];
-            var widths = new float[count];
+            Color[] colors = RoadColors;
+            const int count = RoadCount;
+            PointF[] center = roadCenter;
+            float[] widths = roadWidths;
             float horizon = h * .60f;
             float cursorX = hasMouse ? Math.Max(-1f, Math.Min(1f, (mx / Math.Max(1f, w) - .5f) * 2f)) : 0f;
             float cursorY = hasMouse ? Math.Max(-1f, Math.Min(1f, (my / Math.Max(1f, h) - .58f))) : 0f;
@@ -288,8 +358,8 @@ namespace EmiliosSoundboard
                 widths[i] = (42f + 78f * u) * perspective;
             }
 
-            PointF[] left = new PointF[count], right = new PointF[count];
-            PointF[] sideLeft = new PointF[count], sideRight = new PointF[count];
+            PointF[] left = roadLeft, right = roadRight;
+            PointF[] sideLeft = roadSideLeft, sideRight = roadSideRight;
             for (int i = 0; i < count; i++)
             {
                 PointF before = center[Math.Max(0, i - 1)], after = center[Math.Min(count - 1, i + 1)];
@@ -304,9 +374,9 @@ namespace EmiliosSoundboard
             }
 
             // Soft drop shadow and thick dark 3D underside.
+            PointF[] poly = roadPoly;
             using (var shadow = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
             {
-                PointF[] poly = new PointF[count * 2];
                 for (int i = 0; i < count; i++) poly[i] = new PointF(sideLeft[i].X, sideLeft[i].Y + 8f);
                 for (int i = 0; i < count; i++) poly[count + i] = new PointF(sideRight[count - 1 - i].X, sideRight[count - 1 - i].Y + 8f);
                 g.FillPolygon(shadow, poly);
@@ -315,22 +385,29 @@ namespace EmiliosSoundboard
             using (var side = new SolidBrush(Color.FromArgb(255, 74, 67, 99)))
             using (var edge = new Pen(Color.FromArgb(235, 225, 225, 255), 2.2f))
             {
-                PointF[] poly = new PointF[count * 2];
                 for (int i = 0; i < count; i++) poly[i] = sideLeft[i];
                 for (int i = 0; i < count; i++) poly[count + i] = sideRight[count - 1 - i];
                 g.FillPolygon(underside, poly);
                 // Exposed front lip makes the road look raised, not like a line.
-                // One shared brush for all 99 segments: allocating a SolidBrush per segment was
-                // ~100 GDI+ objects every single frame.
+                // One shared brush and one reused quad keep this allocation-free per frame.
                 using (var face = new SolidBrush(Color.FromArgb(225, 66, 57, 88)))
                 {
                     for (int i = 0; i < count - 1; i++)
                     {
-                        g.FillPolygon(face, new[] { left[i], left[i + 1], sideLeft[i + 1], sideLeft[i] });
-                        g.FillPolygon(face, new[] { right[i], right[i + 1], sideRight[i + 1], sideRight[i] });
+                        roadSegment[0] = left[i];
+                        roadSegment[1] = left[i + 1];
+                        roadSegment[2] = sideLeft[i + 1];
+                        roadSegment[3] = sideLeft[i];
+                        g.FillPolygon(face, roadSegment);
+
+                        roadSegment[0] = right[i];
+                        roadSegment[1] = right[i + 1];
+                        roadSegment[2] = sideRight[i + 1];
+                        roadSegment[3] = sideRight[i];
+                        g.FillPolygon(face, roadSegment);
                     }
                 }
-                PointF[] surface = new PointF[count * 2];
+                PointF[] surface = roadSurface;
                 for (int i = 0; i < count; i++) surface[i] = left[i];
                 for (int i = 0; i < count; i++) surface[count + i] = right[count - 1 - i];
                 using (var bed = new SolidBrush(Color.FromArgb(255, 12, 10, 29))) g.FillPolygon(bed, surface);
@@ -342,7 +419,7 @@ namespace EmiliosSoundboard
             {
                 float f0 = .08f + lane * (.84f / colors.Length);
                 float f1 = .08f + (lane + 1) * (.84f / colors.Length);
-                PointF[] band = new PointF[count * 2];
+                PointF[] band = roadBand;
                 for (int i = 0; i < count; i++)
                 {
                     float u = f0;
@@ -357,14 +434,14 @@ namespace EmiliosSoundboard
                 using (var glow = new Pen(Color.FromArgb(90, colors[lane]), 7f))
                 {
                     glow.LineJoin = LineJoin.Round;
-                    var mid = new PointF[count];
+                    PointF[] mid = roadMid;
                     for (int i = 0; i < count; i++) mid[i] = new PointF((band[i].X + band[count + (count - 1 - i)].X) * .5f, (band[i].Y + band[count + (count - 1 - i)].Y) * .5f);
                     g.DrawLines(glow, mid);
                 }
                 using (var fill = new SolidBrush(Color.FromArgb(245, colors[lane]))) g.FillPolygon(fill, band);
                 using (var shine = new Pen(Color.FromArgb(95, 255, 255, 255), 1f))
                 {
-                    var line = new PointF[count];
+                    PointF[] line = roadLine;
                     for (int i = 0; i < count; i++) line[i] = band[i];
                     g.DrawLines(shine, line);
                 }
@@ -420,16 +497,34 @@ namespace EmiliosSoundboard
             float spacing = w < 760f ? 1.2f : 2.0f;
             // Larger clean white title. The title itself is the easter-egg hit target.
             float titleSize = w < 760f ? 32f : 45f;
-            Font tf = null;
-            float tw = 0f;
-            while (titleSize >= 20f)
+            Font tf;
+            float tw;
+            bool comicTitle = store.Data.Settings.ComicStyleMode;
+            if (fittedTitleFont != null && fittedTitleComic == comicTitle &&
+                Math.Abs(fittedTitleSafeWidth - safeWidth) < 0.5f)
             {
-                tf = TitleFont(titleSize);   // cached, never disposed here
-                tw = Theme.MeasureSpaced(g, title, tf, spacing);
-                if (tw <= safeWidth) break;
-                titleSize -= 1.5f;
+                // The fit loop used to re-measure every character on every frame. Width only
+                // changes on resize, so keep the result until the safe area or skin changes.
+                tf = fittedTitleFont;
+                tw = fittedTitleWidth;
             }
-            if (tf == null) tf = fTitleS;
+            else
+            {
+                tf = null;
+                tw = 0f;
+                while (titleSize >= 20f)
+                {
+                    tf = TitleFont(titleSize);   // cached, never disposed here
+                    tw = Theme.MeasureSpaced(g, title, tf, spacing);
+                    if (tw <= safeWidth) break;
+                    titleSize -= 1.5f;
+                }
+                if (tf == null) tf = fTitleS;
+                fittedTitleFont = tf;
+                fittedTitleWidth = tw;
+                fittedTitleSafeWidth = safeWidth;
+                fittedTitleComic = comicTitle;
+            }
             float ty = 24f;
             float tx = safeLeft + (safeWidth - Math.Min(tw, safeWidth)) / 2f;
             var titleRect = new RectangleF(tx, ty, Math.Min(tw, safeWidth), tf.Height);
@@ -609,7 +704,10 @@ namespace EmiliosSoundboard
                 // Artwork
                 if (c.Cover != null)
                 {
-                    var dest = new[] { new PointF(0, 0), new PointF(w, 0), new PointF(0, h) };
+                    coverDest[0] = new PointF(0, 0);
+                    coverDest[1] = new PointF(w, 0);
+                    coverDest[2] = new PointF(0, h);
+                    PointF[] dest = coverDest;
                     var src = new RectangleF(0, 0, c.CoverW, c.CoverH);
                     if (Theme.ComicStyleMode || alpha < 0.99f)
                     {
@@ -849,9 +947,20 @@ namespace EmiliosSoundboard
 
             // Larger glossy planet with layered orbital rings, a radial glow, and two orbiting moons.
             float cx = r.X + r.Width / 2f, cy = r.Y + 60f;
-            using (var glow = new PathGradientBrush(new[] { new PointF(cx - 31, cy - 31), new PointF(cx + 31, cy - 31), new PointF(cx + 31, cy + 31), new PointF(cx - 31, cy + 31) }))
+            emptyGlowPoints[0] = new PointF(cx - 31, cy - 31);
+            emptyGlowPoints[1] = new PointF(cx + 31, cy - 31);
+            emptyGlowPoints[2] = new PointF(cx + 31, cy + 31);
+            emptyGlowPoints[3] = new PointF(cx - 31, cy + 31);
+            Color glowEdge = Color.FromArgb(0, Theme.Blue);
+            emptyGlowSurround[0] = glowEdge;
+            emptyGlowSurround[1] = glowEdge;
+            emptyGlowSurround[2] = glowEdge;
+            emptyGlowSurround[3] = glowEdge;
+            using (var glow = new PathGradientBrush(emptyGlowPoints))
             {
-                glow.CenterPoint = new PointF(cx, cy); glow.CenterColor = Color.FromArgb(65, Theme.Blue); glow.SurroundColors = new[] { Color.FromArgb(0, Theme.Blue), Color.FromArgb(0, Theme.Blue), Color.FromArgb(0, Theme.Blue), Color.FromArgb(0, Theme.Blue) };
+                glow.CenterPoint = new PointF(cx, cy);
+                glow.CenterColor = Color.FromArgb(65, Theme.Blue);
+                glow.SurroundColors = emptyGlowSurround;
                 g.FillEllipse(glow, cx - 37f, cy - 37f, 74f, 74f);
             }
             using (var orbit = new Pen(Color.FromArgb(105, Theme.Blue), 1.4f)) g.DrawEllipse(orbit, cx - 46f, cy - 17f, 92f, 34f);
@@ -912,8 +1021,7 @@ namespace EmiliosSoundboard
                 g.FillPath(brush, path);
             using (var edge = new Pen(Theme.ComicStyleMode ? Color.Black : Theme.WithAlpha(Theme.Blue, stopHover ? 240 : 145), Theme.ComicStyleMode ? 2.6f : (stopHover ? 1.6f : 1f)))
             using (var path = Theme.RoundedRect(stop, Theme.ComicStyleMode ? 4f : 8f)) g.DrawPath(edge, path);
-            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
-                g.DrawString("STOP SOUND", fStop, B(Theme.ComicStyleMode ? Color.Black : Theme.CoolWhite), stop, sf);
+            g.DrawString("STOP SOUND", fStop, B(Theme.ComicStyleMode ? Color.Black : Theme.CoolWhite), stop, stopFormat);
             g.Restore(stopState);
 
             var track = new RectangleF(r.X + 2f, r.Y + 8f, r.Width - 4f, 30f);

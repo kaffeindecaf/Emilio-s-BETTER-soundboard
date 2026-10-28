@@ -109,6 +109,53 @@ namespace EmiliosSoundboard.Tests
         }
 
         [Fact]
+        public void Load_RecoversTheLastGoodBackupWhenTheMainFileIsCorrupt()
+        {
+            using (var tmp = new TempLibrary())
+            {
+                var store = tmp.NewStore();
+                store.Load();
+                string audio = tmp.WriteAudio("keep.wav");
+                var imported = store.ImportNew(audio, "Keep", null);
+                store.Data.Sounds.Add(imported.Item);
+                Assert.True(store.Save());
+                Assert.True(store.Save()); // creates library.xml.bak
+                Assert.True(File.Exists(store.BackupPath));
+
+                File.WriteAllText(store.ConfigPath, "<LibraryData><Sounds><Sound>");
+
+                var reloaded = tmp.NewStore();
+                reloaded.Load();
+
+                Assert.Single(reloaded.Data.Sounds);
+                Assert.Equal("Keep", reloaded.Data.Sounds[0].Name);
+                Assert.NotNull(reloaded.LoadWarning);
+                Assert.Contains("backup", reloaded.LoadWarning, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        [Fact]
+        public void Load_CanRecoverEvenWhenTheMainFileIsMissing()
+        {
+            using (var tmp = new TempLibrary())
+            {
+                var store = tmp.NewStore();
+                store.Load();
+                string audio = tmp.WriteAudio("keep.wav");
+                store.Data.Sounds.Add(store.ImportNew(audio, "Keep", null).Item);
+                Assert.True(store.Save());
+                Assert.True(store.Save());
+                File.Delete(store.ConfigPath);
+
+                var reloaded = tmp.NewStore();
+                reloaded.Load();
+
+                Assert.Single(reloaded.Data.Sounds);
+                Assert.False(File.Exists(reloaded.ConfigPath));
+            }
+        }
+
+        [Fact]
         public void Load_SanitizesDroppedAndBentEntries()
         {
             using (var tmp = new TempLibrary())

@@ -25,7 +25,7 @@ namespace EmiliosSoundboard
 
         private void OnCoolMusicEnded(object sender, PlaybackEndedEventArgs e)
         {
-            if (!IsDisposed && store.Data.Settings.CoolMode)
+            if (!IsDisposed && !safeMode && store.Data.Settings.CoolMode)
             {
                 string musicPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RainbowRoad.mp3");
                 if (File.Exists(musicPath)) { try { coolMusic.Play("cool-mode-music", musicPath, store.Data.Settings.OutputDevice); } catch (Exception ex) { Log.Warn("audio", "cool mode music could not start", ex); } }
@@ -52,7 +52,7 @@ namespace EmiliosSoundboard
                 forceFrame = true;
             }
             StepDesktopPet(dt);
-            if (store.Data.Settings.DesktopPetEnabled && desktopPetSprite != null) forceFrame = true;
+            if (!safeMode && store.Data.Settings.DesktopPetEnabled && desktopPetSprite != null) forceFrame = true;
 
             bool busy = Step(dt);
             if (busy || forceFrame)
@@ -69,6 +69,7 @@ namespace EmiliosSoundboard
 
         private void StepDesktopPet(float dt)
         {
+            if (safeMode) return;
             var settings = store.Data.Settings;
             string path = settings.DesktopPetImagePath ?? "";
             if (!String.Equals(path, loadedPetPath, StringComparison.OrdinalIgnoreCase))
@@ -171,11 +172,18 @@ namespace EmiliosSoundboard
             player.Volume = set.SoundVolume / 100f;
             localMonitorPlayer.Volume = set.SoundVolume / 100f;
             coolMusic.Volume = set.MusicVolume / 100f;
+            field.NativeEnabled = !safeMode && set.NativeAcceleration;
+            discordRetryTimer -= dt;
+            if (discordRetryTimer <= 0f)
+            {
+                discordRetryTimer = 15f;
+                discordPresence.Tick();
+            }
             if (set.CoolMode != previousCoolMode)
             {
                 previousCoolMode = set.CoolMode;
                 discordPresence.Update(set.CoolMode);
-                if (set.CoolMode)
+                if (set.CoolMode && !safeMode)
                 {
                     string musicPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RainbowRoad.mp3");
                     if (File.Exists(musicPath)) { try { coolMusic.Play("cool-mode-music", musicPath, store.Data.Settings.OutputDevice); } catch (Exception ex) { Log.Warn("audio", "cool mode music could not start", ex); } }
@@ -197,9 +205,9 @@ namespace EmiliosSoundboard
             // --- background and glow
             // Keep the signature space background alive and cursor-reactive even if an older
             // saved settings file had these effects switched off.
-            bgLevel = Ease(bgLevel, 1f, 4f, dt, ref busy);
-            reactLevel = Ease(reactLevel, 1f, 4f, dt, ref busy);
-            glowLevel = Ease(glowLevel, (set.CursorGlow && hasMouse) ? 1f : 0f, 6f, dt, ref busy);
+            bgLevel = Ease(bgLevel, safeMode ? 0f : 1f, 4f, dt, ref busy);
+            reactLevel = Ease(reactLevel, safeMode ? 0f : 1f, 4f, dt, ref busy);
+            glowLevel = Ease(glowLevel, (!safeMode && set.CursorGlow && hasMouse) ? 1f : 0f, 6f, dt, ref busy);
 
             if (hasMouse)
             {
@@ -213,9 +221,9 @@ namespace EmiliosSoundboard
             }
             else glowInit = false;
 
-            bool fieldLive = bgLevel > 0.004f || reactLevel > 0.004f;
+            bool fieldLive = !safeMode && (bgLevel > 0.004f || reactLevel > 0.004f);
             if (fieldLive) fieldSettle = 1.5f; else fieldSettle -= dt;
-            if (fieldSettle > 0f)
+            if (fieldSettle > 0f && !safeMode)
             {
                 hazeTime += dt * bgLevel * (0.4f + k);
                 field.Update(dt, LW, LH, hasMouse, mx, my, bgLevel, reactLevel, k);
@@ -246,7 +254,7 @@ namespace EmiliosSoundboard
                         if (pressed.Card == c) { pressed = new Hit(); pressing = false; }
                         c.Dispose();
                         cards.RemoveAt(i);
-                        viewReady = false;
+                        MarkViewDirty();
                         continue;
                     }
                 }
